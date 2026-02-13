@@ -1,0 +1,7 @@
+{
+  "name": "Huawei Cloud",
+  "content_in_root": false,
+  "domain": "huawei_cloud",
+  "country": "CN",
+  "render_readme": true
+}
