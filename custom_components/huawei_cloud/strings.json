@@ -1,0 +1,98 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Huawei Cloud Service Configuration",
+        "description": "Please configure the Huawei Cloud service connection.\n\nFor configuration help, please visit:\nhttps://github.com/MagicStarTrace/huawei_cloud",
+        "data": {
+          "service_base_url": "Playwright Service URL",
+          "username": "Huawei Account",
+          "password": "Huawei Password",
+          "amap_api_key": "Amap API Key",
+          "enable_gaode_more_info": "Show Amap in device details page (requires gaode_maps)"
+        }
+      },
+      "init": {
+        "title": "Huawei Cloud Service Options",
+        "description": "Configure location update interval and Amap API.\n\nFor configuration help, please visit:\nhttps://github.com/MagicStarTrace/huawei_cloud",
+        "data": {
+          "username": "Huawei Account",
+          "password": "Huawei Password",
+          "interval": "Location update interval (minutes)",
+          "low_battery_threshold": "Low battery threshold (%)",
+          "enable_low_battery_update": "Enable low battery fast update",
+          "low_battery_interval": "Low battery update interval (minutes)",
+          "use_page_location": "Enable active positioning (trigger Huawei Cloud real-time location)",
+          "amap_api_key": "Amap API Key",
+          "enable_gaode_more_info": "Show Amap in device details page (requires gaode_maps)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to Playwright service. Please check the service URL and network connection.",
+      "invalid_auth": "Authentication failed. Please check your username and password.",
+      "base_url_required": "Playwright service URL cannot be empty.",
+      "invalid_url": "Invalid Playwright service URL format. Must start with http:// or https://.",
+      "username_required": "Huawei account cannot be empty.",
+      "password_required": "Huawei password cannot be empty.",
+      "unknown": "Unknown error"
+    },
+    "abort": {
+      "already_configured": "This Huawei Cloud service is already configured."
+    },
+    "progress": {
+      "connecting": "Verifying configuration and connecting to service..."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Huawei Cloud Service Options",
+        "description": "Configure location update interval and Amap API.\n\nFor configuration help, please visit:\nhttps://github.com/MagicStarTrace/huawei_cloud",
+        "data": {
+          "username": "Huawei Account",
+          "password": "Huawei Password",
+          "interval": "Location update interval (minutes)",
+          "low_battery_threshold": "Low battery threshold (%)",
+          "enable_low_battery_update": "Enable low battery fast update",
+          "low_battery_interval": "Low battery update interval (minutes)",
+          "use_page_location": "Enable active positioning (trigger Huawei Cloud real-time location)",
+          "amap_api_key": "Amap API Key",
+          "enable_gaode_more_info": "Show Amap in device details page (requires gaode_maps)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "huawei_logged_in": {
+        "name": "Huawei Login Status"
+      }
+    },
+    "sensor": {
+      "huawei_devices_count": {
+        "name": "Huawei Device Count"
+      },
+      "huawei_session_expires_in": {
+        "name": "Huawei Session Remaining Time"
+      },
+      "huawei_device_battery": {
+        "name": "Huawei Device Battery"
+      }
+    },
+    "button": {
+      "huawei_force_login": {
+        "name": "Huawei Force Login"
+      },
+      "huawei_sync_now": {
+        "name": "Huawei Sync Now"
+      }
+    }
+  },
+  "services": {
+    "force_sync": {
+      "name": "Force Sync",
+      "description": "Immediately trigger a device location sync, ignoring the polling interval."
+    }
+  }
+}

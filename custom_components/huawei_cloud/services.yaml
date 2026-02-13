@@ -1,0 +1,25 @@
+force_sync:
+  name: 强制同步设备位置
+  description: |
+    立即触发一次设备位置同步，忽略轮询间隔。
+
+    - normal 模式：被动同步（读取缓存定位，快速返回）
+    - active 模式：主动定位（触发华为云 locate + 轮询结果，获取实时坐标）
+
+    注意：为防止华为云风控，active 模式有 60 秒限频保护。
+  fields:
+    mode:
+      name: 同步模式
+      description: |
+        - normal：普通模式，读取缓存定位（默认）
+        - active：主动模式，触发实时定位（调用华为云 locate 接口）
+      required: false
+      default: normal
+      example: normal
+      selector:
+        select:
+          options:
+            - label: 普通模式（缓存定位）
+              value: normal
+            - label: 主动模式（实时定位）
+              value: active

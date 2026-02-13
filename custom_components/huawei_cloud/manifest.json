@@ -1,0 +1,14 @@
+{
+  "domain": "huawei_cloud",
+  "name": "华为云服务（Playwright API）",
+  "version": "0.2.0",
+  "requirements": ["aiohttp>=3.9.0"],
+  "config_flow": true,
+  "iot_class": "cloud_polling",
+  "integration_type": "service",
+  "codeowners": [],
+  "documentation": "https://github.com/MagicStarTrace/hw-gps-synchronization",
+  "issue_tracker": "https://github.com/MagicStarTrace/hw-gps-synchronization/issues",
+  "homeassistant": "2024.7.0",
+  "loggers": ["custom_components.huawei_cloud"]
+}

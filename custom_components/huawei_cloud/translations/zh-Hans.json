@@ -1,0 +1,98 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "华为云服务配置",
+        "description": "请配置华为云服务连接信息\n\n如果您需要配置方面的帮助，请查看此处：\nhttps://github.com/MagicStarTrace/huawei_cloud",
+        "data": {
+          "service_base_url": "Playwright服务地址",
+          "username": "华为账号",
+          "password": "华为密码",
+          "amap_api_key": "高德API密钥",
+          "enable_gaode_more_info": "在设备详情页显示高德地图（需安装 gaode_maps）"
+        }
+      },
+      "init": {
+        "title": "华为云服务选项",
+        "description": "配置获取定位的时间间隔和高德API\n\n如果您需要配置方面的帮助，请查看此处：\nhttps://github.com/MagicStarTrace/huawei_cloud",
+        "data": {
+          "username": "华为账号",
+          "password": "华为密码",
+          "interval": "位置更新间隔(分钟)",
+          "low_battery_threshold": "低电量阈值(%)",
+          "enable_low_battery_update": "启用低电量快速更新",
+          "low_battery_interval": "低电量更新间隔(分钟)",
+          "use_page_location": "启用主动定位（触发华为云实时定位）",
+          "amap_api_key": "高德API密钥",
+          "enable_gaode_more_info": "在设备详情页显示高德地图（需安装 gaode_maps）"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接到Playwright服务，请检查服务地址和网络连接",
+      "invalid_auth": "认证失败，请检查用户名和密码",
+      "base_url_required": "Playwright服务地址不能为空",
+      "invalid_url": "Playwright服务地址格式不正确，必须以 http:// 或 https:// 开头",
+      "username_required": "华为账号不能为空",
+      "password_required": "华为密码不能为空",
+      "unknown": "未知错误"
+    },
+    "abort": {
+      "already_configured": "此华为云服务已配置"
+    },
+    "progress": {
+      "connecting": "正在验证配置并连接服务..."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "华为云服务选项",
+        "description": "配置获取定位的时间间隔和高德API\n\n如果您需要配置方面的帮助，请查看此处：\nhttps://github.com/MagicStarTrace/huawei_cloud",
+        "data": {
+          "username": "华为账号",
+          "password": "华为密码",
+          "interval": "位置更新间隔(分钟)",
+          "low_battery_threshold": "低电量阈值(%)",
+          "enable_low_battery_update": "启用低电量快速更新",
+          "low_battery_interval": "低电量更新间隔(分钟)",
+          "use_page_location": "启用主动定位（触发华为云实时定位）",
+          "amap_api_key": "高德API密钥",
+          "enable_gaode_more_info": "在设备详情页显示高德地图（需安装 gaode_maps）"
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "huawei_logged_in": {
+        "name": "华为登录状态"
+      }
+    },
+    "sensor": {
+      "huawei_devices_count": {
+        "name": "华为设备数量"
+      },
+      "huawei_session_expires_in": {
+        "name": "华为会话剩余时间"
+      },
+      "huawei_device_battery": {
+        "name": "华为设备电量"
+      }
+    },
+    "button": {
+      "huawei_force_login": {
+        "name": "华为强制登录"
+      },
+      "huawei_sync_now": {
+        "name": "华为立即同步"
+      }
+    }
+  },
+  "services": {
+    "force_sync": {
+      "name": "强制同步",
+      "description": "立即触发一次设备位置同步，忽略轮询间隔"
+    }
+  }
+}
