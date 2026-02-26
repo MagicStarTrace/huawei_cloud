@@ -12,6 +12,7 @@ from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
     CONF_AMAP_API_KEY,
+    CONF_API_KEY,
     CONF_BASE_URL,
     CONF_ENABLE_GAODE_MORE_INFO,
     CONF_ENABLE_LOW_BATT_UPDATE,
@@ -197,6 +198,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_ENABLE_GAODE_MORE_INFO,
                     default=options.get(CONF_ENABLE_GAODE_MORE_INFO, False)
                 ): bool,
+                vol.Optional(CONF_API_KEY, default=options.get(CONF_API_KEY, "")): str,
             }
         )
 

@@ -9,6 +9,7 @@ CONF_PASSWORD = "password"
 CONF_BASE_URL = "service_base_url"
 CONF_SESSION_KEY = "session_key"
 CONF_AMAP_API_KEY = "amap_api_key"
+CONF_API_KEY = "api_key"
 
 CONF_INTERVAL = "interval"
 CONF_LOW_BATT_INTERVAL = "low_battery_interval"
@@ -26,6 +27,7 @@ DEFAULT_USE_PAGE_LOCATION = True
 PLATFORMS = [
     Platform.DEVICE_TRACKER,
     Platform.SENSOR,
+    Platform.BUTTON,
 ]
 
 API_STATUS = "/status"

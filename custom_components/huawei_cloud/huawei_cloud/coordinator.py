@@ -74,7 +74,17 @@ class SyncCoordinator(DataUpdateCoordinator):
             dev_id = _get_stable_device_id(dev)
             if dev_id:
                 current_ids.add(dev_id)
-                self._last_known_devices[dev_id] = dev.copy()
+                is_fresh = dev.get("is_fresh", True)
+                if is_fresh or dev_id not in self._last_known_devices:
+                    # 新坐标或首次见到：整体覆盖
+                    self._last_known_devices[dev_id] = dev.copy()
+                else:
+                    # 非新坐标：保留缓存中的 latitude/longitude/ts，其余字段更新
+                    merged = self._last_known_devices[dev_id].copy()
+                    for k, v in dev.items():
+                        if k not in ("latitude", "longitude", "ts"):
+                            merged[k] = v
+                    self._last_known_devices[dev_id] = merged
                 self._last_known_timestamps[dev_id] = now
 
         merged = list(devices)
@@ -173,7 +183,11 @@ class SyncCoordinator(DataUpdateCoordinator):
                 self._update_interval_dynamically(devices)
 
             if len(devices) != self._last_device_count or elapsed > 1000:
-                _LOGGER.info(f"[Sync] 设备={len(devices)} | active={active} | {elapsed}ms")
+                fresh_count = sum(1 for d in devices if d.get("is_fresh", True))
+                _LOGGER.info(
+                    f"[Sync] 设备={len(devices)} | active={active} | "
+                    f"is_fresh={fresh_count}/{len(devices)} | {elapsed}ms"
+                )
                 self._last_device_count = len(devices)
 
             return result
@@ -258,7 +272,8 @@ class SyncCoordinator(DataUpdateCoordinator):
     async def _call_sync(self, force_locate: bool = False) -> dict[str, Any]:
         url = f"{self._base_url}/sync"
         body = {"session_key": self._session_key, "force_locate": force_locate}
-        timeout = 30 if force_locate else 15
+        # force_locate：后端最多 15 次轮询×2s，留余量
+        timeout = 65 if force_locate else 15
 
         session = aiohttp_client.async_get_clientsession(self.hass)
 

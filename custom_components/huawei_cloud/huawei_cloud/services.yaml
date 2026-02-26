@@ -1,0 +1,65 @@
+force_sync:
+  name: 强制同步设备位置
+  description: |
+    立即触发一次设备位置同步，忽略轮询间隔。
+
+    - normal 模式：被动同步（读取缓存定位，快速返回）
+    - active 模式：主动定位（触发华为云 locate + 轮询结果，获取实时坐标）
+
+    注意：为防止华为云风控，active 模式有 60 秒限频保护。
+  fields:
+    mode:
+      name: 同步模式
+      description: |
+        - normal：普通模式，读取缓存定位（默认）
+        - active：主动模式，触发实时定位（调用华为云 locate 接口）
+      required: false
+      default: normal
+      example: normal
+      selector:
+        select:
+          options:
+            - label: 普通模式（缓存定位）
+              value: normal
+            - label: 主动模式（实时定位）
+              value: active
+
+force_locate:
+  name: 主动获取实时位置
+  description: |
+    触发完整主动定位链路：
+    1. 向华为云发送 locate 请求（每台设备）
+    2. 轮询 queryLocateResult（最多 15 次，间隔 2s）
+    3. 完成后立即刷新所有实体
+
+    适用于需要立刻获得最新坐标的场景。
+    共享设备同样支持。
+
+ring:
+  name: 响铃（找手机）
+  description: |
+    触发指定设备响铃（华为云查找设备 → 响铃功能）。
+
+    - 同一设备 30 秒内只能触发一次，防止华为风控。
+    - stop 功能暂未支持（HAR 中无对应端点样本）。
+  fields:
+    device_id:
+      name: 设备 ID
+      description: 华为云设备 ID（可在设备追踪器实体属性中查看 device_id 字段）
+      required: true
+      example: "7B165F7EE696F99BBEABC3AFD36AB3DA143E3455816319A8EDFB315FA2D35B79"
+      selector:
+        text:
+    action:
+      name: 动作
+      description: start = 开始响铃（默认）；stop = 停止响铃（暂不支持）
+      required: false
+      default: start
+      example: start
+      selector:
+        select:
+          options:
+            - label: 开始响铃
+              value: start
+            - label: 停止响铃（暂不支持）
+              value: stop

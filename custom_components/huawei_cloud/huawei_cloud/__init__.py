@@ -15,6 +15,7 @@ from .const import (
     CONF_USERNAME,
     CONF_SESSION_KEY,
     CONF_AMAP_API_KEY,
+    CONF_API_KEY,
     CONF_PASSWORD,
     CONF_INTERVAL,
     CONF_LOW_BATT_THRESHOLD,
@@ -318,6 +319,88 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if not hass.services.has_service(DOMAIN, "force_sync"):
         hass.services.async_register(DOMAIN, "force_sync", handle_force_sync)
+
+    async def handle_force_locate(call):
+        """触发主动定位完整链路（locate + poll queryLocateResult）并立即刷新实体。"""
+        _LOGGER.info("[Service] force_locate: 触发主动定位 + 立即刷新")
+        try:
+            await sync_coordinator.async_request_active_locate(force=True)
+            devices_count = len(sync_coordinator.data.get("devices", [])) if sync_coordinator.data else 0
+            fresh_count = sum(1 for d in (sync_coordinator.data or {}).get("devices", []) if d.get("is_fresh"))
+            _LOGGER.info(f"[Service] force_locate 完成，设备={devices_count}，新坐标={fresh_count}")
+        except Exception as e:
+            _LOGGER.error(f"[Service] force_locate 失败: {e}")
+
+    if not hass.services.has_service(DOMAIN, "force_locate"):
+        hass.services.async_register(DOMAIN, "force_locate", handle_force_locate)
+
+    async def handle_ring(call):
+        from homeassistant.helpers import aiohttp_client
+        import aiohttp as _aiohttp
+
+        device_id = call.data.get("device_id", "").strip()
+        action = call.data.get("action", "start").lower()
+
+        if not device_id:
+            _LOGGER.error("[Service] ring: 未提供 device_id")
+            persistent_notification.async_create(
+                hass,
+                title="华为云 响铃",
+                message="缺少 device_id，请在服务调用中填写设备 ID。",
+                notification_id=f"{DOMAIN}_ring_error",
+            )
+            return
+
+        base_url = sync_coordinator._base_url
+        session_key = sync_coordinator._session_key
+        api_key = entry.options.get(CONF_API_KEY, "") or entry.data.get(CONF_API_KEY, "")
+
+        url = f"{base_url}/ring"
+        body = {"session_key": session_key, "device": device_id, "action": action}
+        headers: dict = {}
+        if api_key:
+            headers["X-API-Key"] = api_key
+
+        _LOGGER.info(f"[Service] ring: action={action} device=...{device_id[-4:]}")
+        try:
+            session = aiohttp_client.async_get_clientsession(hass)
+            async with session.post(url, json=body, headers=headers, timeout=_aiohttp.ClientTimeout(total=15)) as resp:
+                data = await resp.json()
+        except Exception as e:
+            _LOGGER.error(f"[Service] ring: 请求后端失败: {e}")
+            persistent_notification.async_create(
+                hass,
+                title="华为云 响铃失败",
+                message=f"网络错误：{e}",
+                notification_id=f"{DOMAIN}_ring_error",
+            )
+            return
+
+        triggered = data.get("triggered", False)
+        cooldown_left = data.get("cooldown_left")
+
+        if triggered:
+            _LOGGER.info("[Service] ring: ✅ 成功")
+            persistent_notification.async_create(
+                hass,
+                title="华为云 响铃",
+                message="✅ 响铃指令已发送，设备应已开始响铃。",
+                notification_id=f"{DOMAIN}_ring_ok",
+            )
+        elif cooldown_left is not None:
+            _LOGGER.info(f"[Service] ring: 后端限流，cooldown_left={cooldown_left}s")
+        else:
+            msg = data.get("msg") or str(data.get("code"))
+            _LOGGER.warning(f"[Service] ring: ❌ 失败: {msg}")
+            persistent_notification.async_create(
+                hass,
+                title="华为云 响铃失败",
+                message=f"失败：{msg}",
+                notification_id=f"{DOMAIN}_ring_error",
+            )
+
+    if not hass.services.has_service(DOMAIN, "ring"):
+        hass.services.async_register(DOMAIN, "ring", handle_ring)
 
     return True
 

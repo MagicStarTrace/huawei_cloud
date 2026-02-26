@@ -325,6 +325,17 @@ class HuaweiTrackerEntity(CoordinatorEntity, TrackerEntity):
             if address:
                 attrs["address"] = address
 
+            # is_fresh / stale_reason / accuracy
+            is_fresh = device.get("is_fresh")
+            if is_fresh is not None:
+                attrs["is_fresh"] = is_fresh
+            stale_reason = device.get("stale_reason")
+            if stale_reason:
+                attrs["stale_reason"] = stale_reason
+            accuracy_val = device.get("accuracy")
+            if accuracy_val is not None:
+                attrs["accuracy_meters"] = accuracy_val
+
             if self._entry.options.get(CONF_ENABLE_GAODE_MORE_INFO, False):
                 attrs["custom_ui_more_info"] = "gaode-map"
         else:

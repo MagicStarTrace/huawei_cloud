@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiohttp
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Frame
@@ -35,6 +35,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 VERSION = "2.3.0-fast-login"
+_HW_MODEL = os.getenv("HW_MODEL", "noh-an00")   # x-hw-model header，可通过环境变量覆盖
+_API_KEY = os.getenv("API_KEY", "")              # 简单鉴权，空=不启用
 STORAGE_DIR = Path(os.getenv("STORAGE_STATE_PATH", "/data"))
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -69,6 +71,7 @@ class SessionState:
     last_err_reason: Optional[str] = None
     user_id: str = ""
     csrf_token: str = ""
+    bell_last_start: Dict[str, float] = field(default_factory=dict)  # device_id → 上次 start 时间
 
 class GlobalState:
     def __init__(self):
@@ -192,6 +195,16 @@ def wgs84_to_gcj02(wgs_lng: float, wgs_lat: float) -> tuple[float, float]:
     gcj02_lng = wgs_lng + dlng
 
     return gcj02_lng, gcj02_lat
+
+
+def bd09_to_gcj02(bd_lng: float, bd_lat: float) -> tuple[float, float]:
+    """BD-09 → GCJ-02"""
+    x = bd_lng - 0.0065
+    y = bd_lat - 0.006
+    z = math.sqrt(x * x + y * y) - 0.00002 * math.sin(y * math.pi * 3000 / 180)
+    theta = math.atan2(y, x) - 0.000003 * math.cos(x * math.pi * 3000 / 180)
+    return z * math.cos(theta), z * math.sin(theta)
+
 
 STEALTH_INIT_SCRIPT = r"""
 (() => {
@@ -1153,7 +1166,11 @@ async def ensure_api_tokens(sess: SessionState, cookies: Dict[str, str]) -> bool
                 status = r.status
                 text = await r.text()
 
-                if status != 200:
+                if status == 401:
+                    # 华为服务端明确表示会话已离线，无法通过 bootstrap 恢复，直接返回失败
+                    logger.warning(f"[Bootstrap] heartbeatCheck HTTP 401（会话已在服务端失效），body={text[:100]}")
+                    return False
+                elif status != 200:
                     logger.warning(f"[Bootstrap] heartbeatCheck HTTP {status}, body={text[:100]}")
                 elif _is_html(text):
                     logger.warning(f"[Bootstrap] heartbeatCheck 返回HTML: {text[:100]}")
@@ -1189,7 +1206,7 @@ async def ensure_api_tokens(sess: SessionState, cookies: Dict[str, str]) -> bool
         logger.exception(f"[Bootstrap] 未知异常: {e}")
         return False
 
-async def call_huawei_api(url: str, body: Dict, cookies: Dict[str, str], sess: SessionState, timeout: float = 5.0) -> Optional[Dict]:
+async def call_huawei_api(url: str, body: Dict, cookies: Dict[str, str], sess: SessionState, timeout: float = 5.0, extra_headers: Optional[Dict[str, str]] = None) -> Optional[Dict]:
     if not sess.user_id or not sess.csrf_token:
         hydrate_result = hydrate_tokens_from_cookies(sess, cookies)
 
@@ -1220,6 +1237,9 @@ async def call_huawei_api(url: str, body: Dict, cookies: Dict[str, str], sess: S
         headers["X-CSRF-Token"] = csrf
     if uid:
         headers["userId"] = uid
+
+    if extra_headers:
+        headers.update(extra_headers)
 
     huawei_cookies = {k: v for k, v in cookies.items() if k}
     cookie_str = "; ".join([f"{k}={v}" for k, v in huawei_cookies.items()])
@@ -1358,6 +1378,81 @@ async def auth_ensure(req: LoginReq):
 async def login(req: LoginReq):
     return await auth_ensure(req)
 
+async def _get_share_grant_info(cookies: Dict, sess: SessionState) -> List[Dict]:
+    """调用 getShareGrantInfo 获取共享给我的设备授权列表"""
+    result = await call_huawei_api(
+        "https://cloud.huawei.com/findDevice/getShareGrantInfo",
+        {"traceId": trace_id()},
+        cookies,
+        sess,
+        timeout=5.0
+    )
+    if not result or _safe_int(result.get("code")) != 0:
+        logger.warning(
+            f"[ShareGrant] getShareGrantInfo 失败: "
+            f"code={result.get('code') if result else 'None'}, "
+            f"info={result.get('info') if result else 'None'}"
+        )
+        return []
+    grants = result.get("shareGrantInfoList") or []
+    logger.debug(f"[ShareGrant] 原始授权条数: {len(grants)}")
+    return grants
+
+
+def _map_grants_to_shared_devices(grants: List[Dict]) -> List[Dict]:
+    """将 shareGrantInfoList 映射为统一设备格式（is_shared=True）"""
+    devices = []
+    for g in grants:
+        device_id = g.get("senderDeviceId")
+        sender_user_id = g.get("senderUserId")
+        if not device_id or not sender_user_id:
+            logger.debug(f"[ShareGrant] 跳过无效授权条目: {list(g.keys())}")
+            continue
+        devices.append({
+            "deviceId": device_id,
+            "deviceType": g.get("senderDeviceType", 9),
+            "deviceAliasName": g.get("senderDeviceName") or "",
+            "deviceName": g.get("senderDeviceName") or "",
+            "name": g.get("senderDeviceName") or "",
+            "senderUserId": sender_user_id,
+            "relationType": 2,
+            "is_shared": True,
+            "unique_key": f"{device_id}__{sender_user_id}",
+        })
+    return devices
+
+
+def _build_locate_payload(dev_info: Dict) -> Dict:
+    """构建 locate 请求 payload，共享设备额外附加 senderUserId/relationType"""
+    payload = {
+        "deviceType": dev_info.get("deviceType", 9),
+        "deviceId": dev_info.get("deviceId", ""),
+        "perDeviceType": "0",
+        "cptList": "",
+        "traceId": trace_id(),
+    }
+    if dev_info.get("is_shared"):
+        payload["senderUserId"] = dev_info["senderUserId"]
+        payload["relationType"] = 2
+    return payload
+
+
+def _build_query_payload(dev_info: Dict, sequence: int = 0) -> Dict:
+    """构建 queryLocateResult 请求 payload，共享设备额外附加 senderUserId/relationType"""
+    payload = {
+        "traceId": trace_id(),
+        "deviceId": dev_info.get("deviceId", ""),
+        "deviceType": dev_info.get("deviceType", 9),
+        "perDeviceType": "0",
+        "sequence": sequence,
+        "presetDevice": False,
+    }
+    if dev_info.get("is_shared"):
+        payload["senderUserId"] = dev_info["senderUserId"]
+        payload["relationType"] = 2
+    return payload
+
+
 @app.post("/sync")
 async def sync(req: SyncReq):
     start = time.time()
@@ -1441,7 +1536,7 @@ async def sync(req: SyncReq):
 
     device_list_result = await call_huawei_api(
         "https://cloud.huawei.com/findDevice/getMobileDeviceList",
-        {"deviceType": 0},
+        {"traceId": trace_id(), "tabLocation": 2, "portalType": 0},
         cookies,
         sess,
         timeout=5.0
@@ -1479,7 +1574,7 @@ async def sync(req: SyncReq):
             logger.info(f"[/sync] bootstrap 重试成功（{bootstrap_elapsed}ms），重新调用 getMobileDeviceList")
             device_list_result = await call_huawei_api(
                 "https://cloud.huawei.com/findDevice/getMobileDeviceList",
-                {"deviceType": 0},
+                {"traceId": trace_id(), "tabLocation": 2, "portalType": 0},
                 cookies,
                 sess,
                 timeout=8.0
@@ -1566,12 +1661,37 @@ async def sync(req: SyncReq):
             "session_key": req.session_key
         }
 
-    device_list = device_list_result.get("deviceList", [])
-    logger.info(f"[/sync] ✅ getMobileDeviceList 成功 code=0, device_count={len(device_list)}")
+    my_device_list = device_list_result.get("deviceList") or []
+    logger.info(f"[/sync] ✅ getMobileDeviceList 成功 code=0, my_devices_count={len(my_device_list)}")
 
-    sess.device_list = device_list.copy() if device_list else []
+    # 获取共享设备
+    shared_grants = await _get_share_grant_info(cookies, sess)
+    shared_devices = _map_grants_to_shared_devices(shared_grants)
+    logger.info(f"[/sync] shared_devices_count={len(shared_devices)}")
 
-    if not device_list:
+    # 标记我的设备
+    for d in my_device_list:
+        d.setdefault("is_shared", False)
+        d["unique_key"] = d.get("deviceId", "")
+
+    all_devices = my_device_list + shared_devices
+
+    # 去重：同一 deviceId 在自有/共享列表均出现时，优先保留自有设备
+    _seen_dedup: set = set()
+    _deduped: list = []
+    for _d in all_devices:
+        _did = _d.get("deviceId")
+        if _did and _did in _seen_dedup:
+            logger.warning(f"[/sync] device={mask(_did)} 去重：跳过重复条目 is_shared={_d.get('is_shared')}")
+            continue
+        if _did:
+            _seen_dedup.add(_did)
+        _deduped.append(_d)
+    all_devices = _deduped
+
+    sess.device_list = all_devices.copy()
+
+    if not all_devices:
         logger.debug(f"[/sync] 设备列表为空，跳过坐标轮询")
         return {
             "code": 0,
@@ -1588,19 +1708,15 @@ async def sync(req: SyncReq):
     active_locate_triggered = False
     if req.force_locate:
         logger.info(f"[/sync] force_locate=true，触发主动定位")
-        for dev_info in device_list:
+        for dev_info in all_devices:
             dev_id = dev_info.get("deviceId")
             if not dev_id:
                 continue
+            is_shared = dev_info.get("is_shared", False)
+            logger.debug(f"[/sync] device={mask(dev_id)} is_shared={is_shared} 触发定位")
             locate_trigger = await call_huawei_api(
                 "https://cloud.huawei.com/findDevice/locate",
-                {
-                    "deviceType": 9,
-                    "deviceId": dev_id,
-                    "perDeviceType": "0",
-                    "cptList": "",
-                    "traceId": trace_id()
-                },
+                _build_locate_payload(dev_info),
                 cookies,
                 sess,
                 timeout=5.0
@@ -1613,27 +1729,29 @@ async def sync(req: SyncReq):
                 logger.warning(f"[/sync] device={mask(dev_id)} 主动定位触发失败 code={trigger_code}")
 
     devices = []
-    for dev_info in device_list:
+    for dev_info in all_devices:
         dev_id = dev_info.get("deviceId")
         if not dev_id:
             continue
 
+        unique_key = dev_info.get("unique_key", dev_id)
+        is_shared = dev_info.get("is_shared", False)
+        logger.debug(f"[/sync] 处理设备 device={mask(dev_id)} is_shared={is_shared}")
+
         max_poll = 15
-        lat, lng, battery, locate_time = None, None, None, None
+        lat, lng, battery, locate_time, accuracy = None, None, None, None, None
         code, info = -1, ""
+        _is_fresh = False
+        _stale_reason = ""
 
         for poll_idx in range(max_poll):
+            # 固定 2s 间隔（force_locate 时），首次不等待
             if req.force_locate and poll_idx > 0:
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(2.0)
 
             result = await call_huawei_api(
                 "https://cloud.huawei.com/findDevice/queryLocateResult",
-                {
-                    "traceId": trace_id(),
-                    "deviceId": dev_id,
-                    "deviceType": 9,
-                    "sequence": poll_idx
-                },
+                _build_query_payload(dev_info, poll_idx),
                 cookies,
                 sess,
                 timeout=3.0
@@ -1647,45 +1765,110 @@ async def sync(req: SyncReq):
             info = result.get("info", "")
 
             if code == 990:
-                logger.warning(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} code=990（定位权限可能未激活，不影响会话建立）")
+                logger.warning(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} code=990（定位权限可能未激活）")
+                _stale_reason = "AUTH_EXPIRED"
                 break
 
             if code == -1:
                 logger.error(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} code=-1（网络错误）: {info}")
+                _stale_reason = "NETWORK_ERROR"
                 break
 
             if code not in (0, 1):
                 logger.error(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} code={code}")
+                _stale_reason = f"API_ERROR_{code}"
                 break
 
+            # --- 解析 locateInfo（可能是 JSON 字符串）---
             loc = result.get("locateInfo", {})
+            _loc_type = type(loc).__name__
             if isinstance(loc, str):
                 try:
                     loc = json.loads(loc)
-                    logger.debug(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} locateInfo 是字符串，已解析为字典")
+                    logger.debug(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} locateInfo: str→dict (len={len(result.get('locateInfo',''))})")
                 except json.JSONDecodeError as e:
-                    logger.warning(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} locateInfo JSON解析失败: {e}, value={loc[:100]}")
+                    logger.warning(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} locateInfo JSON解析失败: {e}, value={str(result.get('locateInfo',''))[:100]}")
                     loc = {}
             elif not isinstance(loc, dict):
-                logger.warning(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} locateInfo 类型异常: type={type(loc)}")
+                logger.warning(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} locateInfo 类型异常: type={_loc_type}")
                 loc = {}
 
-            lat_wgs = loc.get("latitude_WGS")
-            lng_wgs = loc.get("longitude_WGS")
-            lat_gcj = loc.get("latitude")
-            lng_gcj = loc.get("longitude")
+            # --- 解析 coordinateInfo（第二层 JSON 字符串）---
+            coord: Dict = {}
+            _coord_raw = loc.get("coordinateInfo")
+            if isinstance(_coord_raw, str) and _coord_raw:
+                try:
+                    coord = json.loads(_coord_raw)
+                    logger.debug(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} coordinateInfo: str→dict keys={list(coord.keys())}")
+                except json.JSONDecodeError as e:
+                    logger.debug(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} coordinateInfo JSON解析失败: {e}")
+            elif isinstance(_coord_raw, dict):
+                coord = _coord_raw
+                logger.debug(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} coordinateInfo: already dict")
 
-            if lat_wgs is not None and lng_wgs is not None:
-                lat = lat_wgs
-                lng = lng_wgs
-                logger.debug(f"[/sync] device={mask(dev_id)} 使用 WGS84 坐标")
-            elif lat_gcj is not None and lng_gcj is not None:
-                lng, lat = gcj02_to_wgs84(float(lng_gcj), float(lat_gcj))
-                logger.debug(f"[/sync] device={mask(dev_id)} GCJ-02→WGS84 转换完成")
-            else:
-                lat = None
-                lng = None
+            # exeResult 检查（"0"=完成，其他=仍在进行中）
+            exe_result = str(result.get("exeResult", loc.get("exeResult", "")))
 
+            # --- 坐标提取（优先级：locateInfo.WGS84 > coordinateInfo > locateInfo.GCJ02）---
+            _lat_wgs = loc.get("latitude_WGS")
+            _lng_wgs = loc.get("longitude_WGS")
+            _lat_coord = coord.get("latitude")
+            _lng_coord = coord.get("longitude")
+            # sysType: "0"=GCJ-02, "1"=WGS-84, "2"=BD-09；未知时按 GCJ-02 处理
+            _sys_type = str(coord.get("sysType", "")) if coord else ""
+            _lat_gcj_top = loc.get("latitude")
+            _lng_gcj_top = loc.get("longitude")
+
+            _parse_path = "none"
+            if _lat_wgs is not None and _lng_wgs is not None:
+                lat = float(_lat_wgs)
+                lng = float(_lng_wgs)
+                _parse_path = "top-level WGS84"
+                logger.debug(f"[/sync] device={mask(dev_id)} 坐标来源: {_parse_path}")
+            elif _lat_coord is not None and _lng_coord is not None:
+                if _sys_type == "1":
+                    lat = float(_lat_coord)
+                    lng = float(_lng_coord)
+                    _parse_path = "coordinateInfo WGS84 (sysType=1)"
+                elif _sys_type == "2":
+                    gcj_lng, gcj_lat = bd09_to_gcj02(float(_lng_coord), float(_lat_coord))
+                    lng, lat = gcj02_to_wgs84(gcj_lng, gcj_lat)
+                    _parse_path = "coordinateInfo BD09→GCJ02→WGS84 (sysType=2)"
+                else:
+                    lng, lat = gcj02_to_wgs84(float(_lng_coord), float(_lat_coord))
+                    _parse_path = f"coordinateInfo GCJ02→WGS84 (sysType={_sys_type or '?'})"
+                logger.debug(f"[/sync] device={mask(dev_id)} 坐标来源: {_parse_path}")
+            elif _lat_gcj_top is not None and _lng_gcj_top is not None:
+                lng, lat = gcj02_to_wgs84(float(_lng_gcj_top), float(_lat_gcj_top))
+                _parse_path = "top-level GCJ02→WGS84 fallback"
+                logger.debug(f"[/sync] device={mask(dev_id)} 坐标来源: {_parse_path}")
+            # --- DEBUG: 打印坐标数值（输入/输出）---
+            if logger.isEnabledFor(logging.DEBUG) and lat is not None and lng is not None:
+                try:
+                    if "WGS84" in _parse_path and "GCJ02" not in _parse_path:
+                        logger.debug(
+                            f"[/sync] device={mask(dev_id)} COORD OUT(WGS84) lat={float(lat):.6f}, lng={float(lng):.6f}"
+                        )
+                    elif _lat_coord is not None and _lng_coord is not None and "coordinateInfo" in _parse_path:
+                        logger.debug(
+                            f"[/sync] device={mask(dev_id)} COORD IN(GCJ02)  lat={float(_lat_coord):.6f}, lng={float(_lng_coord):.6f}"
+                        )
+                        logger.debug(
+                            f"[/sync] device={mask(dev_id)} COORD OUT(WGS84) lat={float(lat):.6f}, lng={float(lng):.6f}"
+                        )
+                    elif _lat_gcj_top is not None and _lng_gcj_top is not None:
+                        logger.debug(
+                            f"[/sync] device={mask(dev_id)} COORD IN(GCJ02)  lat={float(_lat_gcj_top):.6f}, lng={float(_lng_gcj_top):.6f}"
+                        )
+                        logger.debug(
+                            f"[/sync] device={mask(dev_id)} COORD OUT(WGS84) lat={float(lat):.6f}, lng={float(lng):.6f}"
+                        )
+                except Exception as e:
+                    logger.debug(f"[/sync] device={mask(dev_id)} 坐标打印失败: {e}")
+            # accuracy（优先 coordinateInfo）
+            accuracy = coord.get("accuracy") if coord.get("accuracy") is not None else loc.get("accuracy")
+
+            # battery
             battery = loc.get("battery")
             if not battery:
                 battery_status = loc.get("batteryStatus")
@@ -1696,41 +1879,68 @@ async def sync(req: SyncReq):
                     except (json.JSONDecodeError, AttributeError):
                         pass
 
-            locate_time = None
-            for time_field in ["locateTime", "updateTime", "lastUpdateTime", "timeStamp", "timestamp", "time"]:
-                if time_field in loc:
-                    locate_time = loc.get(time_field)
-                    break
-
-            if locate_time is None and lat is not None and lng is not None:
-                loc_keys = list(loc.keys())
-                logger.debug(f"[/sync] device={mask(dev_id)} locateInfo可用字段: {loc_keys}")
+            locate_time = coord.get("time") if coord else None
+            if locate_time is None and coord:
+                locate_time = coord.get("currentTime")
+            if locate_time is None:
+                for _tf in ["executeTime", "locateTime", "updateTime", "lastUpdateTime", "timeStamp", "timestamp", "time"]:
+                    if _tf in loc:
+                        locate_time = loc.get(_tf)
+                        break
 
             if lat is not None and lng is not None:
-                logger.info(f"[/sync] device={mask(dev_id)} poll={poll_idx+1}/{max_poll} ✓ 获取坐标, battery={battery}, time={locate_time}")
+                _is_fresh = True
+                logger.info(f"[/sync] device={mask(dev_id)} poll={poll_idx+1}/{max_poll} ✓ 获取坐标 path={_parse_path}, battery={battery}, time={locate_time}")
                 break
+
+            # exeResult=="0" 且没坐标：定位已完成但无结果，不必继续轮询
+            if exe_result == "0" and lat is None:
+                logger.debug(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} exeResult=0 但无坐标，停止轮询")
+                _stale_reason = "定位完成但无坐标"
+                break
+
+            logger.debug(f"[/sync] device={mask(dev_id)} poll={poll_idx+1} 无坐标 exeResult={exe_result!r}, 继续轮询...")
 
             if poll_idx < max_poll - 1 and not req.force_locate:
                 await asyncio.sleep(0.4 + 0.2 * (poll_idx % 3) / 3)
 
+        # 超时未获坐标
+        if lat is None and not _stale_reason:
+            _stale_reason = "定位超时"
+
+        # --- 错误码降级：从缓存取旧数据保持实体可用 ---
         if code == 990:
-            cached = sess.device_cache.get(dev_id)
+            cached = sess.device_cache.get(unique_key)
             if cached:
-                devices.append({**cached, "stale": True, "reason": "AUTH_EXPIRED"})
+                devices.append({**cached, "stale": True, "is_fresh": False,
+                                 "stale_reason": "AUTH_EXPIRED", "reason": "AUTH_EXPIRED"})
             continue
 
         if code == -1:
-            cached = sess.device_cache.get(dev_id)
+            cached = sess.device_cache.get(unique_key)
             if cached:
-                devices.append({**cached, "stale": True, "reason": info or "NETWORK_ERROR"})
+                devices.append({**cached, "stale": True, "is_fresh": False,
+                                 "stale_reason": info or "NETWORK_ERROR", "reason": info or "NETWORK_ERROR"})
             continue
 
         if code not in (0, 1):
-            cached = sess.device_cache.get(dev_id)
+            cached = sess.device_cache.get(unique_key)
             if cached:
-                devices.append({**cached, "stale": True, "reason": info or f"API_ERROR_{code}"})
+                devices.append({**cached, "stale": True, "is_fresh": False,
+                                 "stale_reason": info or f"API_ERROR_{code}",
+                                 "reason": info or f"API_ERROR_{code}"})
             continue
-        
+
+        # --- 坐标为空时：降级到缓存中的旧坐标（is_fresh=False）---
+        if lat is None:
+            cached = sess.device_cache.get(unique_key)
+            if cached and cached.get("latitude") is not None:
+                lat = cached["latitude"]
+                lng = cached["longitude"]
+                logger.info(f"[/sync] device={mask(dev_id)} 定位未完成（{_stale_reason}），使用缓存坐标 lat={lat}")
+            else:
+                logger.info(f"[/sync] device={mask(dev_id)} 定位未完成（{_stale_reason}），无缓存坐标")
+
         model = (
             dev_info.get("modelName") or
             dev_info.get("model") or
@@ -1774,8 +1984,8 @@ async def sync(req: SyncReq):
             name = f"Huawei Device {short_id.upper()}"
 
         logger.info(
-            f"[/sync] device={mask(dev_id)} 最终名称: "
-            f"name={name}, model={model or 'None'}, deviceAliasName={device_name or 'None'}"
+            f"[/sync] device={mask(dev_id)} is_shared={is_shared} is_fresh={_is_fresh} "
+            f"name={name}, locate_time={locate_time}"
         )
 
         if locate_time is not None:
@@ -1787,22 +1997,33 @@ async def sync(req: SyncReq):
             ts = int(time.time())
 
         data = {
-            "device_id": dev_id,
+            "device_id": unique_key,
             "name": name,
             "model": model or name,
             "deviceAliasName": device_name,
             "phone": phone,
             "latitude": lat,
             "longitude": lng,
+            "accuracy": accuracy,
             "battery": battery,
-            "stale": False,
-            "ts": ts
+            "stale": not _is_fresh,
+            "is_fresh": _is_fresh,
+            "stale_reason": _stale_reason if not _is_fresh else "",
+            "ts": ts,
+            "is_shared": is_shared,
         }
-        
-        sess.device_cache[dev_id] = data
+        if is_shared:
+            data["senderUserId"] = dev_info.get("senderUserId", "")
+
+        # 只有拿到新坐标时才更新缓存，避免用空坐标覆盖好的缓存
+        if _is_fresh:
+            sess.device_cache[unique_key] = data
+        elif unique_key not in sess.device_cache:
+            sess.device_cache[unique_key] = data
+
         devices.append(data)
-        
-        logger.debug(f"[/sync] device={mask(dev_id)}: has_location={lat is not None}, bat={battery}")
+
+        logger.debug(f"[/sync] device={mask(dev_id)} is_shared={is_shared}: has_location={lat is not None}, is_fresh={_is_fresh}, bat={battery}")
     
     cost_ms = int((time.time() - start) * 1000)
     logger.info(f"[/sync] ✅ 成功，device_count={len(devices)}, {cost_ms}ms")
@@ -2445,6 +2666,145 @@ async def query_locate_result(req: SyncReq):
         "device_count": len(devices),
         "cost_ms": cost_ms,
         "session_key": req.session_key
+    }
+
+
+# ────────────────────────────────────────────────────────────────
+# /ring  响铃（找手机）
+# HAR 来源: cloud.huawei.com.har  POST /findDevice/portalBellReq
+# ────────────────────────────────────────────────────────────────
+
+_BELL_URL = "https://cloud.huawei.com/findDevice/portalBellReq"
+_BELL_RATE_LIMIT_SEC = 30  # 同一设备 start 最短间隔（秒）
+
+_BELL_EXTRA_HEADERS: Dict[str, str] = {
+    "x-hw-framework-type": "0",
+    "x-hw-model": _HW_MODEL,
+}
+
+
+class RingReq(BaseModel):
+    session_key: str
+    device: str              # 完整 deviceId 或末尾若干位，后端模糊匹配
+    action: str = "start"   # "start" | "stop"（stop 尚无 HAR 样本）
+
+
+def _find_device_by_id(device_list: List[Dict], device: str) -> Optional[Dict]:
+    for d in device_list:
+        if (d.get("deviceId") == device
+                or d.get("uniqResource") == device
+                or d.get("unique_key") == device):   # 共享设备 unique_key = "deviceId__senderUserId"
+            return d
+    if len(device) >= 4:
+        for d in device_list:
+            for f in ("deviceId", "uniqResource", "deviceSn"):
+                val = str(d.get(f, ""))
+                if val and val.endswith(device):
+                    return d
+    return None
+
+
+def _build_bell_body(dev_info: Dict) -> Dict:
+    """构造 portalBellReq body；共享设备补加 senderUserId + relationType（与 locate 保持一致）。"""
+    body = {
+        "traceId": trace_id(),
+        "deviceId": dev_info.get("deviceId", ""),
+        "deviceType": dev_info.get("deviceType", 9),
+        "perDeviceType": str(dev_info.get("perDeviceType", "0")),
+        "cptList": "",
+    }
+    if dev_info.get("is_shared"):
+        body["senderUserId"] = dev_info["senderUserId"]
+        body["relationType"] = 2
+    return body
+
+
+async def _call_portal_bell_req(
+    dev_info: Dict,
+    cookies: Dict[str, str],
+    sess: SessionState,
+) -> Dict:
+    body = _build_bell_body(dev_info)
+    result = await call_huawei_api(
+        _BELL_URL, body, cookies, sess,
+        timeout=8.0,
+        extra_headers=_BELL_EXTRA_HEADERS,
+    )
+
+    code = _safe_int(result.get("code") if result else -1)
+    if code == 990:
+        logger.warning(f"[/ring] portalBellReq code=990，触发重登录并重试")
+        if sess.credentials.get("username"):
+            trigger_refresh_login_nowait(sess, reason="BELL_AUTH_990")
+        bootstrap_ok = await ensure_api_tokens(sess, cookies)
+        if bootstrap_ok and sess.csrf_token:
+            body = _build_bell_body(dev_info)
+            result = await call_huawei_api(
+                _BELL_URL, body, cookies, sess,
+                timeout=8.0,
+                extra_headers=_BELL_EXTRA_HEADERS,
+            )
+
+    return result or {"code": -1, "info": "NO_RESPONSE"}
+
+
+@app.post("/ring")
+async def ring(req: RingReq, request: Request):
+    if _API_KEY and request.headers.get("X-API-Key", "") != _API_KEY:
+        return {"code": 403, "msg": "Unauthorized", "device_id": req.device, "triggered": False}
+
+    sess = state.get_session(req.session_key)
+    device = req.device.strip()
+    action = req.action.lower()
+
+    logger.info(f"[/ring] session={req.session_key[:8]} device={mask(device)} action={action}")
+
+    if action == "stop":
+        return {"code": -2, "msg": "stop 暂不支持", "device_id": device, "triggered": False}
+    if action != "start":
+        return {"code": -2, "msg": f"未知 action={action!r}", "device_id": device, "triggered": False}
+
+    matched = _find_device_by_id(sess.device_list, device)
+    if matched:
+        dev_info = matched
+        dev_id = matched["deviceId"]
+    else:
+        logger.debug(f"[/ring] 设备未在缓存中找到，使用原值 device={mask(device)}")
+        dev_info = {"deviceId": device, "deviceType": 9, "perDeviceType": "0"}
+        dev_id = device
+
+    elapsed = time.time() - sess.bell_last_start.get(dev_id, 0.0)
+    if elapsed < _BELL_RATE_LIMIT_SEC:
+        wait = int(_BELL_RATE_LIMIT_SEC - elapsed)
+        logger.warning(f"[/ring] device={mask(dev_id)} 限流 {int(elapsed)}s，需等 {wait}s")
+        return {"code": -3, "msg": f"请 {wait}s 后再试", "device_id": dev_id, "triggered": False, "cooldown_left": wait}
+
+    if not sess.storage_path.exists():
+        if sess.credentials.get("username"):
+            trigger_refresh_login_nowait(sess, reason="RING_NO_STORAGE")
+        return {"code": 990, "msg": "会话不存在", "device_id": dev_id, "triggered": False}
+
+    cookies = await get_cookies_from_storage(sess.storage_path)
+    if not cookies:
+        return {"code": 990, "msg": "cookie 解析失败", "device_id": dev_id, "triggered": False}
+
+    hydrate_tokens_from_cookies(sess, cookies)
+
+    result = await _call_portal_bell_req(dev_info, cookies, sess)
+    code = _safe_int(result.get("code", -1))
+    triggered = code == 0
+
+    if triggered:
+        sess.bell_last_start[dev_id] = time.time()
+        logger.info(f"[/ring] ✅ 响铃成功 device={mask(dev_id)}")
+    else:
+        logger.warning(f"[/ring] ❌ 响铃失败 code={code} info={result.get('info')}")
+
+    return {
+        "code": code,
+        "msg": result.get("info", ""),
+        "device_id": dev_id,
+        "triggered": triggered,
     }
 
 
