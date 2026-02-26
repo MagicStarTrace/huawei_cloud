@@ -38,6 +38,9 @@ def _create_ring_buttons(
     entities = []
 
     for device in devices:
+        if device.get("is_shared"):
+            continue
+
         device_id = _get_stable_device_id(device)
         if not device_id or device_id in known_ids:
             continue

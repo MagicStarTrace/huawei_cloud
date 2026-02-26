@@ -143,8 +143,9 @@ curl http://你的服务器IP:8000/health
 | 设备追踪器 | device_tracker | GPS 位置，在 HA 地图上显示 |
 | 地址 | 传感器 | 中文地址（需高德 API 密钥） |
 | 电量 | 传感器 | 电池百分比 |
+| 响铃 | 按钮 | 触发设备响铃（仅自有设备支持） |
 
-每台华为设备会创建 1 个追踪器 + 2 个传感器（地址、电量）。
+每台华为设备会创建 1 个追踪器 + 2 个传感器（地址、电量）+ 1 个响铃按钮，共 4 个实体。
 
 <div align="center">
   <img src="screenshots/Plugin-Interface.jpg" width="700">
