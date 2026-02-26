@@ -147,6 +147,12 @@ curl http://你的服务器IP:8000/health
 每台华为设备会创建 1 个追踪器 + 2 个传感器（地址、电量）。
 
 <div align="center">
+  <img src="screenshots/Plugin-Interface.jpg" width="700">
+  <br>
+  <sub>插件为每台华为设备创建的 4 个实体（设备追踪器、地址、电量、服务状态）</sub>
+</div>
+
+<div align="center">
   <img src="screenshots/Plugin-Overview.jpg" width="700">
   <br>
   <sub>设备实体创建完成后的整体结构</sub>
@@ -255,6 +261,15 @@ curl http://你的服务器IP:8000/health
 | <img src="screenshots/wechat_pay.jpg" width="240" alt="微信赞赏"> | <img src="screenshots/alipay.jpg" width="240" alt="支付宝赞赏"> |
 
 </div>
+
+**打赏名单**（排名不分先后）
+
+| 昵称 | 金额 |
+|:---:|:---:|
+| Y\*哲\* | ¥200 |
+| 御\* | ¥100 |
+
+感谢每一位支持者，你们的鼓励是持续维护的动力 ❤️
 
 ## 💬 交流与反馈
 
